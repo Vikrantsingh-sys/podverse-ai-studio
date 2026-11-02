@@ -32,7 +32,7 @@ button{background:#7965ee;border:0;font-weight:bold;cursor:pointer;margin-top:18
 <label>Paste transcript</label>
 <textarea id="transcript" placeholder="Paste your podcast transcript here..."></textarea>
 
-<label>Or upload a transcript (.txt)</label>
+<label>Or upload a transcript (.txt, .srt, .vtt)</label>
 <input type="file" id="file" accept=".txt,.srt,.vtt,text/plain">
 
 <div class="grid">
@@ -69,16 +69,69 @@ button{background:#7965ee;border:0;font-weight:bold;cursor:pointer;margin-top:18
 
 <script>
 const fileInput=document.getElementById("file");
+
 fileInput.addEventListener("change",async()=>{
  const file=fileInput.files[0];
  if(!file)return;
+
  if(file.size>5*1024*1024){
-  alert("Please upload a TXT file smaller than 5 MB.");
+  alert("Please upload a file smaller than 5 MB.");
   fileInput.value="";
   return;
  }
+
  document.getElementById("transcript").value=await file.text();
 });
+
+function timeToSeconds(time){
+ const parts=time.replace(",",".").split(":");
+ if(parts.length===3){
+  return Number(parts[0])*3600+Number(parts[1])*60+Number(parts[2]);
+ }
+ if(parts.length===2){
+  return Number(parts[0])*60+Number(parts[1]);
+ }
+ return null;
+}
+
+function secondsToTime(seconds){
+ const h=Math.floor(seconds/3600);
+ const m=Math.floor((seconds%3600)/60);
+ const s=Math.floor(seconds%60);
+ return [h,m,s].map(x=>String(x).padStart(2,"0")).join(":");
+}
+
+function parseSubtitles(text){
+ const lines=text.replace(/\r/g,"").split("\n");
+ const cues=[];
+ const timestamp=/(\d{1,2}:)?\d{2}:\d{2}[,.]\d{3}\s*-->\s*(\d{1,2}:)?\d{2}:\d{2}[,.]\d{3}/;
+
+ for(let i=0;i<lines.length;i++){
+  const match=lines[i].match(timestamp);
+  if(!match)continue;
+
+  const times=lines[i].match(/((?:\d{1,2}:)?\d{2}:\d{2}[,.]\d{3})/g);
+  if(!times||times.length<2)continue;
+
+  const start=timeToSeconds(times[0]);
+  const end=timeToSeconds(times[1]);
+  let content=[];
+  i++;
+
+  while(i<lines.length && lines[i].trim()!==""){
+   if(!lines[i].includes("-->") && !/^\d+$/.test(lines[i].trim())){
+    content.push(lines[i].replace(/<[^>]*>/g,"").trim());
+   }
+   i++;
+  }
+
+  const sentence=content.join(" ").trim();
+  if(sentence && end>start){
+   cues.push({start,end,text:sentence});
+  }
+ }
+ return cues;
+}
 
 function generateClips(){
  const text=document.getElementById("transcript").value.trim();
@@ -88,47 +141,112 @@ function generateClips(){
  const platform=document.getElementById("platform").value;
  const title=document.getElementById("title").value.trim()||"Podcast";
 
- if(!text){result.textContent="Please paste or upload a transcript first.";return;}
+ if(!text){
+  result.textContent="Please paste or upload a transcript first.";
+  return;
+ }
 
- const sentences=text.match(/[^.!?]+[.!?]+|[^.!?]+$/g)||[];
- const clean=sentences.map(s=>s.trim()).filter(s=>s.length>25);
- if(!clean.length){result.textContent="Transcript is too short to create suggestions.";return;}
-
+ const cues=parseSubtitles(text);
  const keywords=["because","secret","mistake","important","learned","success","failure","money","problem","solution","why","how","never","always","believe","experience","truth","difference","change","lesson","challenge","best","worst"];
- const ranked=clean.map((sentence,index)=>{
-  const lower=sentence.toLowerCase();
-  let score=0;
-  keywords.forEach(word=>{if(lower.includes(word))score+=2;});
-  if(sentence.length>60)score+=1;
-  if(sentence.length>120)score+=1;
-  if(index===0)score-=1;
-  return {sentence,index,score};
- }).sort((a,b)=>b.score-a.score);
 
- const selected=ranked.slice(0,count).sort((a,b)=>a.index-b.index);
- const wordsPerSecond=2.5;
- const clipWords=Math.max(20,Math.round(duration*wordsPerSecond));
  let output=`${title}\nPlatform: ${platform}\nDuration target: ${duration} seconds\nAspect ratio: ${platform==="YouTube Long"?"16:9":platform==="Instagram Posts"?"4:5":"9:16"}\n\n`;
- output+="PRELIMINARY CLIP CANDIDATES\n\n";
- selected.forEach((item,i)=>{
-  let context=[];
-  let wordCount=0;
-  for(let j=item.index;j<clean.length;j++){
-   const next=clean[j];
-   const n=next.split(/\s+/).length;
-   if(wordCount+n>clipWords && context.length)break;
-   context.push(next);
-   wordCount+=n;
+
+ if(cues.length){
+  const ranked=cues.map((cue,index)=>{
+   const lower=cue.text.toLowerCase();
+   let score=0;
+   keywords.forEach(word=>{
+    if(lower.includes(word))score+=2;
+   });
+   if(cue.text.length>60)score++;
+   if(cue.text.length>120)score++;
+   return {...cue,index,score};
+  }).sort((a,b)=>b.score-a.score);
+
+  const selected=[];
+  for(const item of ranked){
+   if(selected.length>=count)break;
+   const overlaps=selected.some(existing=>
+    item.start<existing.end && item.end>existing.start
+   );
+   if(!overlaps)selected.push(item);
   }
-  output+=`CLIP ${i+1}\n`;
-  output+=`Transcript position: sentence ${item.index+1}\n`;
-  output+=`Estimated duration: ${Math.round(wordCount/wordsPerSecond)} seconds\n`;
-  output+=`Suggested content:\n${context.join(" ")}\n\n`;
- });
- output+="NOTE: These are transcript-based suggestions, not verified video timestamps. Human review is needed to confirm context and timing.";
+
+  selected.sort((a,b)=>a.start-b.start);
+
+  output+="TIMESTAMPED CLIP CANDIDATES\n\n";
+
+  selected.forEach((item,index)=>{
+   const start=item.start;
+   const endLimit=start+duration;
+   const context=cues.filter(cue=>
+    cue.start>=start && cue.start<endLimit
+   );
+   const end=context.length?Math.min(context[context.length-1].end,endLimit):item.end;
+
+   output+=`CLIP ${index+1}\n`;
+   output+=`Start: ${secondsToTime(start)}\n`;
+   output+=`End: ${secondsToTime(end)}\n`;
+   output+=`Duration: ${Math.round(end-start)} seconds\n`;
+   output+=`Suggested content:\n${context.map(c=>c.text).join(" ")}\n\n`;
+  });
+
+  if(!selected.length){
+   output+="No suitable timestamped clips found.";
+  }
+
+  output+="NOTE: Times are taken from subtitle timestamps. Review clip boundaries before exporting.";
+
+ }else{
+  const sentences=text.replace(/WEBVTT/g,"").match(/[^.!?]+[.!?]+|[^.!?]+$/g)||[];
+  const clean=sentences.map(s=>s.trim()).filter(s=>s.length>25);
+
+  if(!clean.length){
+   result.textContent="Transcript is too short to create suggestions.";
+   return;
+  }
+
+  const ranked=clean.map((sentence,index)=>{
+   const lower=sentence.toLowerCase();
+   let score=0;
+   keywords.forEach(word=>{
+    if(lower.includes(word))score+=2;
+   });
+   if(sentence.length>60)score++;
+   if(sentence.length>120)score++;
+   if(index===0)score--;
+   return {sentence,index,score};
+  }).sort((a,b)=>b.score-a.score);
+
+  const selected=ranked.slice(0,count).sort((a,b)=>a.index-b.index);
+  const clipWords=Math.max(20,Math.round(duration*2.5));
+
+  output+="PRELIMINARY CLIP CANDIDATES\n\n";
+
+  selected.forEach((item,i)=>{
+   let context=[];
+   let wordCount=0;
+   for(let j=item.index;j<clean.length;j++){
+    const next=clean[j];
+    const n=next.split(/\s+/).length;
+    if(wordCount+n>clipWords && context.length)break;
+    context.push(next);
+    wordCount+=n;
+   }
+
+   output+=`CLIP ${i+1}\n`;
+   output+=`Transcript position: sentence ${item.index+1}\n`;
+   output+=`Estimated duration: ${Math.round(wordCount/2.5)} seconds\n`;
+   output+=`Suggested content:\n${context.join(" ")}\n\n`;
+  });
+
+  output+="NOTE: No subtitle timestamps were detected. Upload an SRT or VTT file for timestamped suggestions.";
+ }
+
  result.textContent=output;
 }
 </script>
 </body>
 </html>
+
 
