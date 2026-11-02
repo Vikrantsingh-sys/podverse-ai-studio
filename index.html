@@ -19,7 +19,6 @@ button:disabled{opacity:.5;cursor:not-allowed}
 .grid{display:grid;grid-template-columns:repeat(2,1fr);gap:14px}
 .panel{background:#131521;padding:18px;border-radius:12px;margin-top:20px}
 video{width:100%;max-height:480px;background:#08090e;border-radius:10px;margin-top:12px}
-#result{white-space:pre-wrap;line-height:1.6;background:#11131d;padding:15px;border-radius:10px;margin-top:15px}
 .clip{background:#292b3b;padding:14px;border-radius:9px;margin:10px 0;border:1px solid #444}
 .clip button{margin-top:8px}
 .status{color:#b8aaff;white-space:pre-wrap;margin-top:12px}
@@ -109,11 +108,13 @@ video{width:100%;max-height:480px;background:#08090e;border-radius:10px;margin-t
 </div>
 <button onclick="previewClip()">Preview Selected Clip</button>
 <button id="exportBtn" onclick="exportClip()">Export Video (WebM)</button>
-<div id="status" class="status">Upload a video and timestamped subtitles to get started.</div>
+<div id="status" class="status">Upload a video and its timestamped subtitles. Gemini AI will select meaningful moments.</div>
 </div>
 </main>
 
 <script>
+const API_URL="https://podverse-ai-studio.onrender.com";
+
 const video=document.getElementById("video");
 const videoFile=document.getElementById("videoFile");
 const subtitleFile=document.getElementById("subtitleFile");
@@ -129,27 +130,34 @@ let exporting=false;
 videoFile.addEventListener("change",()=>{
  const file=videoFile.files[0];
  if(!file)return;
+
  if(videoURL)URL.revokeObjectURL(videoURL);
+
  videoURL=URL.createObjectURL(file);
  video.src=videoURL;
+
  statusBox.textContent="Video loaded. Upload its subtitles to find clips.";
 });
 
 subtitleFile.addEventListener("change",async()=>{
  const file=subtitleFile.files[0];
  if(!file)return;
+
  if(file.size>5*1024*1024){
   alert("Subtitle file must be smaller than 5 MB.");
   return;
  }
+
  transcript.value=await file.text();
  statusBox.textContent="Subtitle file loaded.";
 });
 
 function toSeconds(t){
  const p=t.replace(",",".").split(":").map(Number);
+
  if(p.length===3)return p[0]*3600+p[1]*60+p[2];
  if(p.length===2)return p[0]*60+p[1];
+
  return NaN;
 }
 
@@ -157,41 +165,62 @@ function clock(s){
  const h=Math.floor(s/3600);
  const m=Math.floor(s%3600/60);
  const sec=(s%60).toFixed(1).padStart(4,"0");
+
  return String(h).padStart(2,"0")+":"+String(m).padStart(2,"0")+":"+sec;
 }
 
 function parseSubtitles(raw){
  const lines=raw.replace(/\r/g,"").split("\n");
  const found=[];
+
  const timeRegex=/((?:\d{1,2}:)?\d{2}:\d{2}[,.]\d{3})\s*-->\s*((?:\d{1,2}:)?\d{2}:\d{2}[,.]\d{3})/;
 
  for(let i=0;i<lines.length;i++){
+
   const match=lines[i].match(timeRegex);
   if(!match)continue;
+
   const start=toSeconds(match[1]);
   const end=toSeconds(match[2]);
+
   let text=[];
   i++;
+
   while(i<lines.length && lines[i].trim()!==""){
+
    if(!/^\d+$/.test(lines[i].trim())){
-    text.push(lines[i].replace(/<[^>]*>/g,"").replace(/&amp;/g,"&").trim());
+    text.push(
+      lines[i]
+      .replace(/<[^>]*>/g,"")
+      .replace(/&amp;/g,"&")
+      .trim()
+    );
    }
+
    i++;
   }
+
   const sentence=text.join(" ").trim();
+
   if(sentence && Number.isFinite(start) && end>start){
    found.push({start,end,text:sentence});
   }
  }
+
  return found.sort((a,b)=>a.start-b.start);
 }
 
-function generateClips(){
+
+// GEMINI AI SEMANTIC CLIP ANALYSIS
+async function generateClips(){
+
  if(!video.src){
   statusBox.textContent="Please upload your podcast video first.";
   return;
  }
+
  cues=parseSubtitles(transcript.value);
+
  if(!cues.length){
   statusBox.textContent="No valid subtitle timestamps found. Please upload an SRT or VTT file.";
   return;
@@ -199,83 +228,153 @@ function generateClips(){
 
  const duration=Number(document.getElementById("duration").value);
  const count=Number(document.getElementById("count").value);
- const keywords=[
-  "because","secret","mistake","important","learned","success",
-  "failure","money","problem","solution","why","how","never",
-  "always","believe","experience","truth","difference","change",
-  "lesson","challenge","best","worst","remember","understand",
-  "think","realize","reason","story","actually","first"
- ];
 
- const ranked=cues.map((cue,index)=>{
-  const lower=cue.text.toLowerCase();
-  let score=0;
-  keywords.forEach(word=>{
-   if(lower.includes(word))score+=2;
+ const generateBtn=document.getElementById("generateBtn");
+
+ generateBtn.disabled=true;
+ generateBtn.textContent="AI is finding meaningful moments...";
+
+ statusBox.textContent="Sending transcript to PodVerse AI. This may take a little time...";
+
+ document.getElementById("clips").innerHTML="";
+
+ try{
+
+  const response=await fetch(API_URL+"/analyze-semantic",{
+   method:"POST",
+
+   headers:{
+    "Content-Type":"application/json",
+    "Accept":"application/json"
+   },
+
+   body:JSON.stringify({
+    segments:cues.map(c=>({
+     start:c.start,
+     end:c.end,
+     text:c.text
+    })),
+
+    duration:duration,
+    count:count
+   })
   });
-  if(cue.text.length>60)score++;
-  if(cue.text.length>120)score++;
-  if(/[?!]/.test(cue.text))score++;
-  return {...cue,index,score};
- }).sort((a,b)=>b.score-a.score);
 
- clips=[];
- for(const item of ranked){
-  if(clips.length>=count)break;
-  let start=item.start;
-  let end=Math.min(start+duration,video.duration||start+duration);
-  if(end<=start)continue;
+  const data=await response.json().catch(()=>({}));
 
-  const overlap=clips.some(c=>start<c.end && end>c.start);
-  if(overlap)continue;
+  if(!response.ok){
 
-  const dialogue=cues.filter(c=>c.start<end && c.end>start);
-  clips.push({
-   start,end,
-   score:item.score,
-   text:dialogue.map(c=>c.text).join(" ")
+   const detail=typeof data.detail==="string"
+    ?data.detail
+    :(data.detail?.message || JSON.stringify(data.detail || data));
+
+   throw new Error(
+    detail || `AI analysis failed (HTTP ${response.status}).`
+   );
+  }
+
+  if(!data.success || !Array.isArray(data.clips) || !data.clips.length){
+   throw new Error(
+    data.message || "AI could not find suitable clips. Try a different duration or more subtitles."
+   );
+  }
+
+  clips=data.clips.map(c=>({
+   start:Number(c.start),
+   end:Number(c.end),
+   duration:Number(c.duration),
+   hook:c.hook || "Podcast Highlight",
+   reason:c.reason || "",
+   text:c.text || "",
+   score:0
+  })).filter(c=>
+   Number.isFinite(c.start) &&
+   Number.isFinite(c.end) &&
+   c.start>=0 &&
+   c.end>c.start &&
+   c.end<=(video.duration || Infinity)
+  );
+
+  if(!clips.length){
+   throw new Error(
+    "AI returned clips outside the uploaded video's duration. Check that the subtitles belong to this video."
+   );
+  }
+
+  clips.sort((a,b)=>a.start-b.start);
+
+  clipSelect.innerHTML="";
+
+  const container=document.getElementById("clips");
+
+  container.innerHTML="<h4>AI-selected meaningful moments</h4>";
+
+  clips.forEach((c,i)=>{
+
+   const option=document.createElement("option");
+
+   option.value=i;
+
+   option.textContent=
+    `Clip ${i+1} — ${c.hook} (${clock(c.start)} to ${clock(c.end)})`;
+
+   clipSelect.appendChild(option);
+
+   const card=document.createElement("div");
+   card.className="clip";
+
+   const heading=document.createElement("strong");
+
+   heading.textContent=
+    `Clip ${i+1} | ${c.hook} | ${clock(c.start)} – ${clock(c.end)}`;
+
+   const reason=document.createElement("p");
+   reason.textContent=c.reason;
+
+   const paragraph=document.createElement("p");
+   paragraph.textContent=c.text;
+
+   const button=document.createElement("button");
+   button.textContent="Edit this clip";
+   button.onclick=()=>selectClip(i);
+
+   card.append(heading,reason,paragraph,button);
+
+   container.appendChild(card);
   });
+
+  selectClip(0);
+
+  statusBox.textContent=
+   `AI successfully selected ${clips.length} meaningful clip(s). Choose a clip to preview or export.`;
+
+ }catch(error){
+
+  clips=[];
+
+  clipSelect.innerHTML=
+   '<option value="">Generate clips first</option>';
+
+  statusBox.textContent="AI analysis failed: "+error.message;
+
+ }finally{
+
+  generateBtn.disabled=false;
+  generateBtn.textContent="Find Meaningful Moments";
  }
- clips.sort((a,b)=>a.start-b.start);
-
- if(!clips.length){
-  statusBox.textContent="No suitable clips found.";
-  return;
- }
-
- clipSelect.innerHTML="";
- const container=document.getElementById("clips");
- container.innerHTML="<h4>Suggested clips</h4>";
-
- clips.forEach((c,i)=>{
-  const option=document.createElement("option");
-  option.value=i;
-  option.textContent=`Clip ${i+1} — ${clock(c.start)} to ${clock(c.end)}`;
-  clipSelect.appendChild(option);
-
-  const card=document.createElement("div");
-  card.className="clip";
-  const heading=document.createElement("strong");
-  heading.textContent=`Clip ${i+1} | ${clock(c.start)} – ${clock(c.end)}`;
-  const paragraph=document.createElement("p");
-  paragraph.textContent=c.text;
-  const button=document.createElement("button");
-  button.textContent="Edit this clip";
-  button.onclick=()=>selectClip(i);
-  card.append(heading,paragraph,button);
-  container.appendChild(card);
- });
-
- selectClip(0);
- statusBox.textContent=clips.length+" clip suggestions created. Choose a clip to preview or export.";
 }
 
+
 function selectClip(index){
+
  const c=clips[index];
  if(!c)return;
+
  clipSelect.value=index;
+
  document.getElementById("startTime").value=c.start.toFixed(1);
  document.getElementById("endTime").value=c.end.toFixed(1);
+
  video.currentTime=c.start;
 }
 
@@ -283,208 +382,349 @@ clipSelect.addEventListener("change",()=>{
  selectClip(Number(clipSelect.value));
 });
 
+
 function getRange(){
+
  const start=Number(document.getElementById("startTime").value);
  const end=Number(document.getElementById("endTime").value);
- if(!Number.isFinite(start)||!Number.isFinite(end)||start<0||end<=start||end>video.duration){
+
+ if(
+  !Number.isFinite(start) ||
+  !Number.isFinite(end) ||
+  start<0 ||
+  end<=start ||
+  end>video.duration
+ ){
   throw new Error("Please enter valid start and end times within the video.");
  }
+
  return {start,end};
 }
 
+
 function previewClip(){
+
  try{
+
   const r=getRange();
+
   video.currentTime=r.start;
   video.play();
-  statusBox.textContent="Preview playing. Playback will stop at the selected end time.";
- }catch(e){statusBox.textContent=e.message;}
+
+  statusBox.textContent=
+   "Preview playing. Playback will stop at the selected end time.";
+
+ }catch(e){
+
+  statusBox.textContent=e.message;
+ }
 }
 
+
 video.addEventListener("timeupdate",()=>{
+
  const end=Number(document.getElementById("endTime").value);
+
  if(video.currentTime>=end && !video.paused){
   video.pause();
  }
 });
 
+
 function activeCaption(time){
+
  return cues.find(c=>time>=c.start && time<=c.end)?.text||"";
 }
 
+
 function drawCaption(ctx,text,w,h){
+
  if(!text)return;
+
  const style=document.getElementById("captionStyle").value;
+
  const fontSize=Math.max(22,Math.round(w*.045));
+
  ctx.font=`bold ${fontSize}px Arial`;
  ctx.textAlign="center";
  ctx.textBaseline="middle";
 
  const words=text.split(/\s+/);
+
  const lines=[];
  let line="";
+
  const maxWidth=w*.84;
 
  words.forEach(word=>{
+
   const test=line?line+" "+word:word;
+
   if(ctx.measureText(test).width>maxWidth && line){
    lines.push(line);
    line=word;
-  }else line=test;
+  }else{
+   line=test;
+  }
  });
+
  if(line)lines.push(line);
 
  const lineHeight=fontSize*1.25;
+
  const yStart=h*.76-(lines.length-1)*lineHeight/2;
 
  lines.forEach((l,i)=>{
+
   const y=yStart+i*lineHeight;
+
   const width=ctx.measureText(l).width+24;
+
   ctx.fillStyle="rgba(0,0,0,.68)";
   ctx.fillRect((w-width)/2,y-lineHeight/2,width,lineHeight);
+
   ctx.fillStyle=style==="yellow"?"#ffe45c":"#ffffff";
+
   ctx.fillText(l,w/2,y);
  });
 }
 
+
+// VIDEO EXPORT
 async function exportClip(){
+
  if(exporting)return;
+
  let range;
- try{range=getRange();}
- catch(e){statusBox.textContent=e.message;return;}
+
+ try{
+  range=getRange();
+ }catch(e){
+  statusBox.textContent=e.message;
+  return;
+ }
 
  if(!video.videoWidth){
   statusBox.textContent="Please wait for the video to load.";
   return;
  }
+
  if(!window.MediaRecorder || !HTMLCanvasElement.prototype.captureStream){
   statusBox.textContent="Your browser does not support video recording. Use the latest Chrome.";
   return;
  }
 
  exporting=true;
+
  const btn=document.getElementById("exportBtn");
+
  btn.disabled=true;
+
  statusBox.textContent="Preparing video export...";
 
  const ratio=document.getElementById("platform").value.split(":").map(Number);
+
  const outputWidth=ratio[0]===9?720:ratio[0]===4?720:1280;
  const outputHeight=ratio[0]===9?1280:ratio[0]===4?900:720;
 
  const canvas=document.createElement("canvas");
+
  canvas.width=outputWidth;
  canvas.height=outputHeight;
+
  const ctx=canvas.getContext("2d");
 
  const canvasStream=canvas.captureStream(30);
+
  let combined=canvasStream;
 
  try{
+
   const sourceStream=video.captureStream();
-  sourceStream.getAudioTracks().forEach(track=>combined.addTrack(track));
+
+  sourceStream.getAudioTracks().forEach(track=>{
+   combined.addTrack(track);
+  });
+
  }catch(e){
+
   statusBox.textContent="Audio capture is not supported by this browser.";
+
   canvasStream.getTracks().forEach(t=>t.stop());
+
   exporting=false;
   btn.disabled=false;
+
   return;
  }
 
- const mimeTypes=["video/webm;codecs=vp9,opus","video/webm;codecs=vp8,opus","video/webm"];
+ const mimeTypes=[
+  "video/webm;codecs=vp9,opus",
+  "video/webm;codecs=vp8,opus",
+  "video/webm"
+ ];
+
  const mimeType=mimeTypes.find(t=>MediaRecorder.isTypeSupported(t));
+
  if(!mimeType){
+
   statusBox.textContent="WebM recording is not supported by your browser.";
+
   combined.getTracks().forEach(t=>t.stop());
+
   exporting=false;
   btn.disabled=false;
+
   return;
  }
 
  const recorder=new MediaRecorder(combined,{mimeType});
+
  const chunks=[];
- recorder.ondataavailable=e=>{if(e.data.size)chunks.push(e.data);};
+
+ recorder.ondataavailable=e=>{
+  if(e.data.size)chunks.push(e.data);
+ };
 
  const finished=new Promise(resolve=>{
   recorder.onstop=resolve;
   recorder.onerror=()=>resolve();
  });
 
+
  function drawFrame(){
+
   const vw=video.videoWidth;
   const vh=video.videoHeight;
+
   const targetRatio=outputWidth/outputHeight;
   const sourceRatio=vw/vh;
+
   let sx=0,sy=0,sw=vw,sh=vh;
+
   if(sourceRatio>targetRatio){
+
    sw=vh*targetRatio;
    sx=(vw-sw)/2;
+
   }else{
+
    sh=vw/targetRatio;
    sy=(vh-sh)/2;
   }
+
   ctx.fillStyle="#000";
+
   ctx.fillRect(0,0,outputWidth,outputHeight);
-  ctx.drawImage(video,sx,sy,sw,sh,0,0,outputWidth,outputHeight);
-  drawCaption(ctx,activeCaption(video.currentTime),outputWidth,outputHeight);
-  if(exporting)requestAnimationFrame(drawFrame);
+
+  ctx.drawImage(
+   video,
+   sx,sy,sw,sh,
+   0,0,outputWidth,outputHeight
+  );
+
+  drawCaption(
+   ctx,
+   activeCaption(video.currentTime),
+   outputWidth,
+   outputHeight
+  );
+
+  if(exporting){
+   requestAnimationFrame(drawFrame);
+  }
  }
 
+
  try{
+
   video.pause();
+
   video.currentTime=range.start;
+
   await new Promise(resolve=>{
    video.addEventListener("seeked",resolve,{once:true});
   });
 
   recorder.start(250);
+
   exporting=true;
+
   drawFrame();
+
   await video.play();
 
-  statusBox.textContent="Exporting video... Please keep this tab open.";
+  statusBox.textContent=
+   "Exporting video... Please keep this tab open.";
+
   await new Promise(resolve=>{
+
    const check=()=>{
+
     if(video.currentTime>=range.end || video.ended){
+
      video.pause();
      resolve();
+
     }else if(!exporting){
+
      resolve();
+
     }else{
+
      requestAnimationFrame(check);
     }
    };
+
    check();
   });
 
   exporting=false;
+
   recorder.stop();
+
   await finished;
 
   const blob=new Blob(chunks,{type:"video/webm"});
+
   const url=URL.createObjectURL(blob);
+
   const link=document.createElement("a");
+
   link.href=url;
   link.download="PodVerse-Clip-"+Date.now()+".webm";
+
   document.body.appendChild(link);
+
   link.click();
+
   link.remove();
 
-  statusBox.textContent="Export complete! Your WebM video has been saved.";
+  statusBox.textContent=
+   "Export complete! Your WebM video has been saved.";
+
   setTimeout(()=>URL.revokeObjectURL(url),60000);
 
  }catch(error){
+
   exporting=false;
-  if(recorder.state==="recording")recorder.stop();
+
+  if(recorder.state==="recording"){
+   recorder.stop();
+  }
+
   statusBox.textContent="Export failed: "+error.message;
+
  }finally{
+
   exporting=false;
+
   combined.getTracks().forEach(t=>t.stop());
+
   btn.disabled=false;
  }
 }
 </script>
 </body>
 </html>
-
-
 
