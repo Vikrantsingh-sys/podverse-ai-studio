@@ -1,6 +1,7 @@
 
 import os
 import json
+import time
 import urllib.request
 import urllib.error
 
@@ -13,7 +14,6 @@ from youtube_transcript_api import YouTubeTranscriptApi
 
 app = FastAPI(title="PodVerse AI Studio")
 
-
 # CORS SETTINGS
 app.add_middleware(
     CORSMiddleware,
@@ -21,6 +21,14 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# GEMINI MODEL CONFIGURATION
+GEMINI_MODELS = [
+    "gemini-3.8-flash",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash-lite"
+]
 
 
 # REQUEST MODELS
@@ -56,6 +64,135 @@ def get_video_id(url):
             return parsed.path.split("/")[2]
 
     return None
+
+
+# GEMINI API WITH AUTOMATIC RETRY AND BACKUP MODELS
+def call_gemini(prompt, api_key):
+
+    errors = []
+
+    for model in GEMINI_MODELS:
+
+        api_url = (
+            "https://generativelanguage.googleapis.com/v1beta/"
+            f"models/{model}:generateContent"
+        )
+
+        payload = {
+            "contents": [
+                {
+                    "parts": [
+                        {
+                            "text": prompt
+                        }
+                    ]
+                }
+            ],
+            "generationConfig": {
+                "responseMimeType": "application/json"
+            }
+        }
+
+        api_request = urllib.request.Request(
+            api_url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "x-goog-api-key": api_key
+            },
+            method="POST"
+        )
+
+        # Maximum 2 attempts per model
+        for attempt in range(2):
+
+            try:
+                with urllib.request.urlopen(
+                    api_request,
+                    timeout=120
+                ) as response:
+
+                    result = json.loads(
+                        response.read().decode("utf-8")
+                    )
+
+                candidates = result.get("candidates", [])
+
+                if not candidates:
+                    raise ValueError(
+                        "Gemini returned no candidates."
+                    )
+
+                parts = candidates[0].get(
+                    "content", {}
+                ).get("parts", [])
+
+                if not parts or "text" not in parts[0]:
+                    raise ValueError(
+                        "Gemini returned an empty response."
+                    )
+
+                print(f"Gemini model used: {model}")
+
+                return parts[0]["text"]
+
+            except urllib.error.HTTPError as error:
+
+                error_detail = error.read().decode(
+                    "utf-8",
+                    errors="replace"
+                )
+
+                errors.append(
+                    f"{model}: HTTP {error.code} - {error_detail[:400]}"
+                )
+
+                # Temporary errors: retry with increasing wait
+                if error.code in [408, 429, 500, 502, 503, 504]:
+
+                    if attempt == 0:
+                        time.sleep(2)
+                        continue
+
+                    break
+
+                # Model unavailable: try the next model
+                if error.code == 404:
+                    break
+
+                # Invalid API key, request or permissions
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Gemini API error: {error_detail[:800]}"
+                )
+
+            except urllib.error.URLError as error:
+
+                errors.append(
+                    f"{model}: Connection error - {str(error)}"
+                )
+
+                if attempt == 0:
+                    time.sleep(2)
+                    continue
+
+                break
+
+            except (json.JSONDecodeError, ValueError) as error:
+
+                errors.append(
+                    f"{model}: {str(error)}"
+                )
+                break
+
+    raise HTTPException(
+        status_code=503,
+        detail={
+            "message": "All Gemini models are temporarily unavailable.",
+            "tried_models": GEMINI_MODELS,
+            "errors": errors
+        }
+    )
 
 
 # HOME ROUTE
@@ -125,7 +262,7 @@ def analyze_semantic(request: SemanticRequest):
             detail="Transcript is empty."
         )
 
-    # Prepare transcript with original timestamps and indexes
+    # PREPARE TRANSCRIPT
     transcript = [
         {
             "index": index,
@@ -162,7 +299,7 @@ Return valid JSON only in this exact structure:
   "clips": [
     {{
       "start_index": 0,
-      "end_index": 10,
+      "end_index": 2,
       "hook": "An engaging short title",
       "reason": "Why this moment is interesting"
     }}
@@ -173,50 +310,15 @@ TRANSCRIPT:
 {json.dumps(transcript, ensure_ascii=False)}
 """
 
-    payload = {
-        "contents": [
-            {
-                "parts": [
-                    {
-                        "text": prompt
-                    }
-                ]
-            }
-        ],
-        "generationConfig": {
-            "responseMimeType": "application/json",
-            "temperature": 0.3
-        }
-    }
-
-    api_url = (
-        "https://generativelanguage.googleapis.com/v1beta/"
-        "models/gemini-3.8-flash:generateContent"
-    )
-
-    api_request = urllib.request.Request(
-        api_url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Content-Type": "application/json",
-            "x-goog-api-key": api_key
-        },
-        method="POST"
-    )
-
     try:
-        with urllib.request.urlopen(api_request, timeout=120) as response:
-            result = json.loads(
-                response.read().decode("utf-8")
-            )
 
-        ai_text = (
-            result["candidates"][0]["content"]["parts"][0]["text"]
-        )
+        # CALL PRIMARY MODEL AND AUTOMATIC BACKUPS
+        ai_text = call_gemini(prompt, api_key)
 
         ai_data = json.loads(ai_text)
 
         selected_clips = []
+        used_indexes = []
 
         for clip in ai_data.get("clips", []):
 
@@ -233,6 +335,14 @@ TRANSCRIPT:
                 continue
 
             if end_index >= len(request.segments):
+                continue
+
+            # Prevent duplicate or overlapping clips
+            clip_indexes = set(
+                range(start_index, end_index + 1)
+            )
+
+            if clip_indexes.intersection(used_indexes):
                 continue
 
             start_time = request.segments[start_index].start
@@ -266,6 +376,8 @@ TRANSCRIPT:
                 "text": clip_text
             })
 
+            used_indexes.extend(clip_indexes)
+
         return {
             "success": True,
             "total_clips": len(selected_clips),
@@ -273,27 +385,13 @@ TRANSCRIPT:
             "message": "AI semantic analysis completed."
         }
 
-    except urllib.error.HTTPError as error:
-        error_detail = error.read().decode(
-            "utf-8",
-            errors="replace"
-        )
+    except HTTPException:
+        raise
 
+    except json.JSONDecodeError as error:
         raise HTTPException(
             status_code=502,
-            detail=f"Gemini API error: {error_detail[:1000]}"
-        )
-
-    except urllib.error.URLError as error:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Could not connect to Gemini API: {str(error)}"
-        )
-
-    except (KeyError, IndexError, json.JSONDecodeError) as error:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Unexpected Gemini response: {str(error)}"
+            detail=f"Invalid JSON returned by Gemini: {str(error)}"
         )
 
     except Exception as error:
