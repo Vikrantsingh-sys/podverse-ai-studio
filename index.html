@@ -32,7 +32,15 @@ video{width:100%;max-height:480px;background:#08090e;border-radius:10px;margin-t
 <p>Your personal podcast clipping and editing workspace.</p>
 
 <div class="panel">
-<h3>01. Upload Podcast</h3>
+<h3>01. Analyze YouTube Podcast</h3>
+<label>YouTube Podcast URL</label>
+<input type="url" id="youtubeUrl" placeholder="Paste YouTube podcast link here...">
+<button id="analyzeYoutubeBtn" onclick="analyzePodcast()">Analyze Podcast</button>
+<p class="small">PodVerse will try to fetch the video's available transcript and identify meaningful moments. Transcript access depends on YouTube availability.</p>
+</div>
+
+<div class="panel">
+<h3>02. Upload Podcast Video for Preview and Export</h3>
 <label>Video file</label>
 <input type="file" id="videoFile" accept="video/*">
 <p class="small">Use a video you own or have permission to edit and publish.</p>
@@ -40,7 +48,7 @@ video{width:100%;max-height:480px;background:#08090e;border-radius:10px;margin-t
 </div>
 
 <div class="panel">
-<h3>02. Transcript and Subtitles</h3>
+<h3>03. Transcript and Subtitles (Optional if YouTube transcript works)</h3>
 <label>Upload SRT / VTT subtitle file</label>
 <input type="file" id="subtitleFile" accept=".srt,.vtt,text/plain">
 <label>Or paste transcript / subtitles</label>
@@ -49,7 +57,7 @@ video{width:100%;max-height:480px;background:#08090e;border-radius:10px;margin-t
 </div>
 
 <div class="panel">
-<h3>03. Clip Settings</h3>
+<h3>04. Clip Settings</h3>
 <div class="grid">
 <div>
 <label>Publishing platform</label>
@@ -91,7 +99,7 @@ video{width:100%;max-height:480px;background:#08090e;border-radius:10px;margin-t
 </div>
 
 <div class="panel">
-<h3>04. Preview and Export</h3>
+<h3>05. Preview and Export</h3>
 <label>Select clip</label>
 <select id="clipSelect">
 <option value="">Generate clips first</option>
@@ -108,7 +116,7 @@ video{width:100%;max-height:480px;background:#08090e;border-radius:10px;margin-t
 </div>
 <button onclick="previewClip()">Preview Selected Clip</button>
 <button id="exportBtn" onclick="exportClip()">Export Video (WebM)</button>
-<div id="status" class="status">Upload a video and its timestamped subtitles. Gemini AI will select meaningful moments.</div>
+<div id="status" class="status">Paste a YouTube link to fetch its transcript, or upload a video with timestamped subtitles. A video file is required for preview and export.</div>
 </div>
 </main>
 
@@ -136,7 +144,7 @@ videoFile.addEventListener("change",()=>{
  videoURL=URL.createObjectURL(file);
  video.src=videoURL;
 
- statusBox.textContent="Video loaded. Upload its subtitles to find clips.";
+ statusBox.textContent="Video loaded. You can now preview and export your selected clips.";
 });
 
 subtitleFile.addEventListener("change",async()=>{
@@ -167,6 +175,16 @@ function clock(s){
  const sec=(s%60).toFixed(1).padStart(4,"0");
 
  return String(h).padStart(2,"0")+":"+String(m).padStart(2,"0")+":"+sec;
+}
+
+function toSrtTime(seconds){
+ const totalMs=Math.max(0,Math.round(seconds*1000));
+ const h=Math.floor(totalMs/3600000);
+ const m=Math.floor((totalMs%3600000)/60000);
+ const sec=Math.floor((totalMs%60000)/1000);
+ const ms=totalMs%1000;
+
+ return `${String(h).padStart(2,"0")}:${String(m).padStart(2,"0")}:${String(sec).padStart(2,"0")},${String(ms).padStart(3,"0")}`;
 }
 
 function parseSubtitles(raw){
@@ -211,13 +229,98 @@ function parseSubtitles(raw){
 }
 
 
-// GEMINI AI SEMANTIC CLIP ANALYSIS
-async function generateClips(){
+// FETCH YOUTUBE TRANSCRIPT
+async function analyzePodcast(){
 
- if(!video.src){
-  statusBox.textContent="Please upload your podcast video first.";
+ const url=document.getElementById("youtubeUrl").value.trim();
+ const btn=document.getElementById("analyzeYoutubeBtn");
+
+ if(!url){
+  statusBox.textContent="Please paste a YouTube podcast link.";
   return;
  }
+
+ if(!/^https?:\/\/(www\.)?(youtube\.com|youtu\.be)\//i.test(url)){
+  statusBox.textContent="Please enter a valid YouTube link.";
+  return;
+ }
+
+ btn.disabled=true;
+ btn.textContent="Fetching transcript...";
+
+ statusBox.textContent="Connecting to PodVerse and requesting the available YouTube transcript...";
+
+ try{
+
+  const response=await fetch(API_URL+"/analyze",{
+   method:"POST",
+   headers:{
+    "Content-Type":"application/json",
+    "Accept":"application/json"
+   },
+   body:JSON.stringify({url:url})
+  });
+
+  const data=await response.json().catch(()=>({}));
+
+  if(!response.ok){
+   const detail=typeof data.detail==="string"
+    ?data.detail
+    :JSON.stringify(data.detail || data);
+
+   throw new Error(detail || `Transcript request failed (HTTP ${response.status}).`);
+  }
+
+  const sourceSegments=data.transcript || data.segments;
+
+  if(!Array.isArray(sourceSegments) || !sourceSegments.length){
+   throw new Error(data.message || "No transcript was returned for this video.");
+  }
+
+  const timestamped=sourceSegments.map(segment=>{
+
+   const start=Number(segment.start);
+   const end=Number(segment.end ?? (start+Number(segment.duration || 0)));
+
+   return {
+    start,
+    end,
+    text:String(segment.text || "").trim()
+   };
+
+  }).filter(segment=>
+   Number.isFinite(segment.start) &&
+   Number.isFinite(segment.end) &&
+   segment.end>segment.start &&
+   segment.text
+  );
+
+  if(!timestamped.length){
+   throw new Error("The transcript did not contain usable timestamps.");
+  }
+
+  transcript.value=timestamped.map((segment,index)=>
+   `${index+1}\n${toSrtTime(segment.start)} --> ${toSrtTime(segment.end)}\n${segment.text}`
+  ).join("\n\n");
+
+  statusBox.textContent=`Transcript fetched (${timestamped.length} segments). Sending it to Gemini for meaningful clip selection...`;
+
+  await generateClips();
+
+ }catch(error){
+
+  statusBox.textContent="YouTube transcript fetch failed: "+error.message+"\nYou can still upload your own timestamped SRT/VTT subtitles below.";
+
+ }finally{
+
+  btn.disabled=false;
+  btn.textContent="Analyze Podcast";
+ }
+}
+
+
+// GEMINI AI SEMANTIC CLIP ANALYSIS
+async function generateClips(){
 
  cues=parseSubtitles(transcript.value);
 
@@ -312,7 +415,6 @@ async function generateClips(){
   clips.forEach((c,i)=>{
 
    const option=document.createElement("option");
-
    option.value=i;
 
    option.textContent=
@@ -346,7 +448,7 @@ async function generateClips(){
   selectClip(0);
 
   statusBox.textContent=
-   `AI successfully selected ${clips.length} meaningful clip(s). Choose a clip to preview or export.`;
+   `AI successfully selected ${clips.length} meaningful clip(s). Upload the original video to preview and export.`;
 
  }catch(error){
 
@@ -375,7 +477,9 @@ function selectClip(index){
  document.getElementById("startTime").value=c.start.toFixed(1);
  document.getElementById("endTime").value=c.end.toFixed(1);
 
- video.currentTime=c.start;
+ if(video.src){
+  video.currentTime=c.start;
+ }
 }
 
 clipSelect.addEventListener("change",()=>{
@@ -403,6 +507,11 @@ function getRange(){
 
 
 function previewClip(){
+
+ if(!video.src || !Number.isFinite(video.duration)){
+  statusBox.textContent="Upload the original video file first to preview this clip.";
+  return;
+ }
 
  try{
 
@@ -432,7 +541,6 @@ video.addEventListener("timeupdate",()=>{
 
 
 function activeCaption(time){
-
  return cues.find(c=>time>=c.start && time<=c.end)?.text||"";
 }
 
@@ -442,7 +550,6 @@ function drawCaption(ctx,text,w,h){
  if(!text)return;
 
  const style=document.getElementById("captionStyle").value;
-
  const fontSize=Math.max(22,Math.round(w*.045));
 
  ctx.font=`bold ${fontSize}px Arial`;
@@ -450,10 +557,8 @@ function drawCaption(ctx,text,w,h){
  ctx.textBaseline="middle";
 
  const words=text.split(/\s+/);
-
  const lines=[];
  let line="";
-
  const maxWidth=w*.84;
 
  words.forEach(word=>{
@@ -471,20 +576,17 @@ function drawCaption(ctx,text,w,h){
  if(line)lines.push(line);
 
  const lineHeight=fontSize*1.25;
-
  const yStart=h*.76-(lines.length-1)*lineHeight/2;
 
  lines.forEach((l,i)=>{
 
   const y=yStart+i*lineHeight;
-
   const width=ctx.measureText(l).width+24;
 
   ctx.fillStyle="rgba(0,0,0,.68)";
   ctx.fillRect((w-width)/2,y-lineHeight/2,width,lineHeight);
 
   ctx.fillStyle=style==="yellow"?"#ffe45c":"#ffffff";
-
   ctx.fillText(l,w/2,y);
  });
 }
@@ -492,6 +594,11 @@ function drawCaption(ctx,text,w,h){
 
 // VIDEO EXPORT
 async function exportClip(){
+
+ if(!video.src || !Number.isFinite(video.duration)){
+  statusBox.textContent="Upload the original video file first to export this clip.";
+  return;
+ }
 
  if(exporting)return;
 
@@ -517,7 +624,6 @@ async function exportClip(){
  exporting=true;
 
  const btn=document.getElementById("exportBtn");
-
  btn.disabled=true;
 
  statusBox.textContent="Preparing video export...";
@@ -528,12 +634,10 @@ async function exportClip(){
  const outputHeight=ratio[0]===9?1280:ratio[0]===4?900:720;
 
  const canvas=document.createElement("canvas");
-
  canvas.width=outputWidth;
  canvas.height=outputHeight;
 
  const ctx=canvas.getContext("2d");
-
  const canvasStream=canvas.captureStream(30);
 
  let combined=canvasStream;
@@ -551,7 +655,6 @@ async function exportClip(){
   statusBox.textContent="Audio capture is not supported by this browser.";
 
   canvasStream.getTracks().forEach(t=>t.stop());
-
   exporting=false;
   btn.disabled=false;
 
@@ -571,7 +674,6 @@ async function exportClip(){
   statusBox.textContent="WebM recording is not supported by your browser.";
 
   combined.getTracks().forEach(t=>t.stop());
-
   exporting=false;
   btn.disabled=false;
 
@@ -579,7 +681,6 @@ async function exportClip(){
  }
 
  const recorder=new MediaRecorder(combined,{mimeType});
-
  const chunks=[];
 
  recorder.ondataavailable=e=>{
@@ -590,7 +691,6 @@ async function exportClip(){
   recorder.onstop=resolve;
   recorder.onerror=()=>resolve();
  });
-
 
  function drawFrame(){
 
@@ -603,43 +703,28 @@ async function exportClip(){
   let sx=0,sy=0,sw=vw,sh=vh;
 
   if(sourceRatio>targetRatio){
-
    sw=vh*targetRatio;
    sx=(vw-sw)/2;
-
   }else{
-
    sh=vw/targetRatio;
    sy=(vh-sh)/2;
   }
 
   ctx.fillStyle="#000";
-
   ctx.fillRect(0,0,outputWidth,outputHeight);
 
-  ctx.drawImage(
-   video,
-   sx,sy,sw,sh,
-   0,0,outputWidth,outputHeight
-  );
+  ctx.drawImage(video,sx,sy,sw,sh,0,0,outputWidth,outputHeight);
 
-  drawCaption(
-   ctx,
-   activeCaption(video.currentTime),
-   outputWidth,
-   outputHeight
-  );
+  drawCaption(ctx,activeCaption(video.currentTime),outputWidth,outputHeight);
 
   if(exporting){
    requestAnimationFrame(drawFrame);
   }
  }
 
-
  try{
 
   video.pause();
-
   video.currentTime=range.start;
 
   await new Promise(resolve=>{
@@ -647,31 +732,24 @@ async function exportClip(){
   });
 
   recorder.start(250);
-
   exporting=true;
 
   drawFrame();
 
   await video.play();
 
-  statusBox.textContent=
-   "Exporting video... Please keep this tab open.";
+  statusBox.textContent="Exporting video... Please keep this tab open.";
 
   await new Promise(resolve=>{
 
    const check=()=>{
 
     if(video.currentTime>=range.end || video.ended){
-
      video.pause();
      resolve();
-
     }else if(!exporting){
-
      resolve();
-
     }else{
-
      requestAnimationFrame(check);
     }
    };
@@ -680,28 +758,22 @@ async function exportClip(){
   });
 
   exporting=false;
-
   recorder.stop();
 
   await finished;
 
   const blob=new Blob(chunks,{type:"video/webm"});
-
   const url=URL.createObjectURL(blob);
 
   const link=document.createElement("a");
-
   link.href=url;
   link.download="PodVerse-Clip-"+Date.now()+".webm";
 
   document.body.appendChild(link);
-
   link.click();
-
   link.remove();
 
-  statusBox.textContent=
-   "Export complete! Your WebM video has been saved.";
+  statusBox.textContent="Export complete! Your WebM video has been saved.";
 
   setTimeout(()=>URL.revokeObjectURL(url),60000);
 
@@ -718,13 +790,10 @@ async function exportClip(){
  }finally{
 
   exporting=false;
-
   combined.getTracks().forEach(t=>t.stop());
-
   btn.disabled=false;
  }
 }
 </script>
 </body>
 </html>
-
