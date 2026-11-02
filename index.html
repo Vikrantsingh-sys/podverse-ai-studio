@@ -6,91 +6,73 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>PodVerse AI Studio</title>
 <style>
-*{box-sizing:border-box}
-body{margin:0;background:#09090f;color:#f5f3ff;font-family:Arial,sans-serif}
-header{padding:22px 6%;border-bottom:1px solid #292438;display:flex;justify-content:space-between;align-items:center}
-.logo{font-size:24px;font-weight:800;color:#c4a2ff}
-.logo span{color:white}
-main{max-width:1050px;margin:45px auto;padding:0 22px}
-h1{font-size:36px;margin-bottom:8px}
-.sub{color:#a7a1b8;margin-bottom:32px}
-.panel{background:#14121e;border:1px solid #30283e;border-radius:16px;padding:25px;margin-bottom:20px}
-label{display:block;margin:17px 0 8px;color:#ddd4ed;font-size:14px}
-input,select{width:100%;padding:13px;background:#0c0b12;border:1px solid #393147;border-radius:9px;color:white}
-.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:16px}
-.platforms{display:flex;gap:10px;flex-wrap:wrap}
-.platform{background:#211b30;padding:12px;border-radius:9px;display:flex;gap:8px;align-items:center}
-button{background:#9b68ee;color:white;border:0;border-radius:9px;padding:14px 22px;font-weight:bold;cursor:pointer;margin-top:22px}
-button:hover{background:#b18af6}
-.note{color:#a9a1b7;font-size:13px;line-height:1.6}
-#status{margin-top:18px;color:#c5a3ff}
-@media(max-width:650px){.grid{grid-template-columns:1fr}h1{font-size:28px}}
+body{margin:0;background:#10111a;color:white;font-family:Arial,sans-serif;padding:30px}
+main{max-width:750px;margin:40px auto;background:#1c1e2b;padding:28px;border-radius:16px}
+h1{margin-top:0;color:#a99aff}
+p{color:#c5c5d5}
+input,select,button{box-sizing:border-box;width:100%;padding:14px;margin:10px 0;border-radius:8px;border:1px solid #444;background:#292b3b;color:white}
+button{background:#7663ed;border:0;font-weight:bold;cursor:pointer}
+#result{white-space:pre-wrap;overflow-wrap:anywhere;background:#11131c;padding:15px;border-radius:8px;margin-top:18px}
+label{display:block;margin-top:14px}
 </style>
 </head>
 <body>
-<header>
-<div class="logo">POD<span>VERSE</span> AI</div>
-<div>PERSONAL STUDIO</div>
-</header>
 <main>
-<h1>Your Podcast. Your Clips.</h1>
-<p class="sub">Turn meaningful conversations into professional social videos.</p>
+<h1>PodVerse AI Studio</h1>
+<p>Turn your permitted podcast content into meaningful short clips.</p>
 
-<section class="panel">
-<h2>01 — Add your podcast</h2>
-<label>Podcast video link</label>
-<input type="url" placeholder="Paste your video URL here">
-<label>Or upload your original video</label>
-<input type="file" accept="video/*">
-<p class="note">Use videos you own or have permission to edit and publish.</p>
-</section>
+<label>YouTube Podcast Link</label>
+<input id="videoUrl" type="url" placeholder="Paste YouTube link here">
 
-<section class="panel">
-<h2>02 — Choose publishing platforms</h2>
-<div class="platforms">
-<label class="platform"><input type="checkbox" value="Instagram Reels"> Instagram Reels</label>
-<label class="platform"><input type="checkbox" value="YouTube Shorts"> YouTube Shorts</label>
-<label class="platform"><input type="checkbox" value="Instagram Posts"> Instagram Posts</label>
-<label class="platform"><input type="checkbox" value="YouTube Long"> YouTube Long</label>
-</div>
-</section>
+<label>Platform</label>
+<select id="platform">
+<option>Instagram Reels</option>
+<option>YouTube Shorts</option>
+<option>Instagram Posts</option>
+<option>YouTube Long Video</option>
+</select>
 
-<section class="panel">
-<h2>03 — Clip settings</h2>
-<div class="grid">
-<div>
-<label>Clip duration</label>
-<select>
-<option>30 seconds</option><option>40 seconds</option>
-<option>60 seconds</option><option>2 minutes</option>
-<option>Custom duration</option>
+<label>Clip Duration</label>
+<select id="duration">
+<option value="30">30 seconds</option>
+<option value="40">40 seconds</option>
+<option value="60">60 seconds</option>
+<option value="120">2 minutes</option>
 </select>
-</div>
-<div>
-<label>Number of clips</label>
-<select>
-<option>1</option><option>3</option><option>5</option>
-<option>10</option><option>15</option>
+
+<label>Number of Clips</label>
+<select id="count">
+<option>3</option>
+<option>5</option>
+<option>10</option>
 </select>
-</div>
-</div>
-<label>Caption style</label>
-<select>
-<option>Professional Podcast</option>
-<option>Word Highlight</option>
-<option>Minimal Clean</option>
-<option>Bold Animated</option>
-</select>
-<label>Editing style</label>
-<select>
-<option>Professional Podcast</option>
-<option>Dynamic Zoom & Cuts</option>
-<option>Clean & Minimal</option>
-</select>
-<button onclick="document.getElementById('status').textContent='Dashboard ready. Video processing will be connected in the next development stage.'">Prepare my clips</button>
-<div id="status"></div>
-</section>
+
+<button onclick="analyze()">Analyze Podcast</button>
+<div id="result">Your analysis will appear here.</div>
 </main>
-<script src="app.js"></script>
+
+<script>
+async function analyze(){
+ const url=document.getElementById("videoUrl").value.trim();
+ const result=document.getElementById("result");
+ if(!url){result.textContent="Please paste a YouTube link.";return;}
+ result.textContent="Connecting to PodVerse server...";
+ try{
+  const response=await fetch("https://podverse-ai-studio.onrender.com/analyze",{
+   method:"POST",
+   headers:{"Content-Type":"application/json"},
+   body:JSON.stringify({url})
+  });
+  const data=await response.json();
+  if(data.success){
+   result.textContent="Transcript received!\n\n"+data.transcript_segments.map(x=>x.text).join(" ");
+  }else{
+   result.textContent="Transcript could not be retrieved.\n\n"+(data.detail||data.message)+"\n\nYouTube may be blocking cloud-server requests.";
+  }
+ }catch(error){
+  result.textContent="Could not connect to server. Please try again.";
+ }
+}
+</script>
 </body>
 </html>
