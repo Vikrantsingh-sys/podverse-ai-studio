@@ -191,7 +191,7 @@ TRANSCRIPT:
 
     api_url = (
         "https://generativelanguage.googleapis.com/v1beta/"
-        "models/gemini-2.5-flash:generateContent"
+        "models/gemini-3.8-flash:generateContent"
     )
 
     api_request = urllib.request.Request(
@@ -301,3 +301,4 @@ TRANSCRIPT:
             status_code=500,
             detail=f"AI analysis failed: {str(error)[:500]}"
         )
+
